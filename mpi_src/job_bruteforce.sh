@@ -13,4 +13,4 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Compilation successful."
-mpirun -np 4 ./MPI_BruteForce
+time mpirun -np 1 ./MPI_BruteForce

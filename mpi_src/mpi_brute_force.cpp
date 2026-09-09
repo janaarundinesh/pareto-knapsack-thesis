@@ -58,10 +58,57 @@ std::vector<Item> UnflattenItems(
     return items;
 }
 
+std::vector<Item> MergeMaxima(
+    const std::vector<Item>& existing,
+    const std::vector<Item>& incoming,
+    size_t d)
+{
+    std::vector<Item> result;
+    result.reserve(existing.size() + incoming.size());
 
-// ============================================================
-// MAIN
-// ============================================================
+    // Keep existing points that are not dominated by any incoming point
+    for (const auto& e : existing)
+    {
+        bool dominated = false;
+
+        for (const auto& n : incoming)
+        {
+            if (Dominates(n, e, d))
+            {
+                dominated = true;
+                break;
+            }
+        }
+
+        if (!dominated)
+        {
+            result.push_back(e);
+        }
+    }
+
+    // Keep incoming points that are not dominated by any (original) existing point
+    for (const auto& n : incoming)
+    {
+        bool dominated = false;
+
+        for (const auto& e : existing)
+        {
+            if (Dominates(e, n, d))
+            {
+                dominated = true;
+                break;
+            }
+        }
+
+        if (!dominated)
+        {
+            result.push_back(n);
+        }
+    }
+
+    return result;
+}
+
 
 int main(int argc, char** argv)
 {
@@ -88,7 +135,7 @@ int main(int argc, char** argv)
     if (rank == 0)
     {
         std::string filename =
-            "../DataSets/5D_Data/Test1.txt";
+            "../DataSets/10D_Data/Test5.txt";
 
         std::ifstream file(filename);
 
@@ -105,7 +152,7 @@ int main(int argc, char** argv)
         file >> dimensions >> num_points;
 
         // ====================================================
-        // Read all coords
+        // 2. Read all coords
         // ====================================================
 
         all_data.resize(num_points * dimensions);
@@ -224,28 +271,6 @@ int main(int argc, char** argv)
 
 
     // ========================================================
-    // Display local maxima
-    // ========================================================
-
-    MPI_Barrier(MPI_COMM_WORLD);
-
-    for (int p = 0; p < size; ++p)
-    {
-        if (rank == p)
-        {
-            std::cout
-                << "\nProcess "
-                << rank
-                << " local maxima: "
-                << local_maxima.size()
-                << std::endl;
-        }
-
-        MPI_Barrier(MPI_COMM_WORLD);
-    }
-
-
-    // ========================================================
     // 9. FAN-IN
     // ========================================================
 
@@ -302,26 +327,15 @@ int main(int argc, char** argv)
                     MPI_STATUS_IGNORE
                 );
 
+                std::vector<Item> received_maxima = UnflattenItems(received_data, received_count, dimensions);
 
                 // =================================================
-                // Convert received data into Items
+                // Both sides are already individually non-dominated,
+                // so only cross-compare existing vs newly received
+                // rather than re-running brute force on everything.
                 // =================================================
 
-                std::vector<Item> received_maxima =
-                    UnflattenItems(
-                        received_data,
-                        received_count,
-                        dimensions
-                    );
-
-
-                // =================================================
-                // Combine our maxima with received maxima
-                // =================================================
-
-                local_maxima.insert(local_maxima.end(),received_maxima.begin(),received_maxima.end());
-
-                local_maxima = BruteForceMaxima(local_maxima, dimensions);
+                local_maxima = MergeMaxima(local_maxima, received_maxima, dimensions);
             }
         }
 
@@ -338,32 +352,21 @@ int main(int argc, char** argv)
                     local_maxima.size()
                 );
 
-            MPI_Send(
+            std::vector<double> maxima_data = FlattenItems(local_maxima, dimensions);
+
+            MPI_Request requests[2];
+
+            MPI_Isend(
                 &count,
                 1,
                 MPI_INT,
                 receiver,
                 0,
-                MPI_COMM_WORLD
+                MPI_COMM_WORLD,
+                &requests[0]
             );
 
-
-            // =================================================
-            // Convert maxima to flat data
-            // =================================================
-
-            std::vector<double> maxima_data =
-                FlattenItems(
-                    local_maxima,
-                    dimensions
-                );
-
-
-            // =================================================
-            // Send maxima
-            // =================================================
-
-            MPI_Send(
+            MPI_Isend(
                 maxima_data.data(),
                 static_cast<int>(
                     maxima_data.size()
@@ -371,20 +374,22 @@ int main(int argc, char** argv)
                 MPI_DOUBLE,
                 receiver,
                 1,
-                MPI_COMM_WORLD
+                MPI_COMM_WORLD,
+                &requests[1]
             );
+
+            MPI_Waitall(2, requests, MPI_STATUSES_IGNORE);
 
             break;
         }
-
-
-        // Move to the next level of the tree
 
         step *= 2;
     }
 
     if (rank == 0)
     {
+        std::cout << "\nNumber of processes: " << size << std::endl;
+
         std::cout << "\nInitial number of points: " << num_points << std::endl;
 
         std::cout << "\nFinal maxima: " << local_maxima.size() << std::endl;
